@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root { --bg:#fff; --surface:#fff; --text:#25364a; --muted:#718096; --border:#d6e0e8; --accent:#087f8c; --hover:rgba(8,127,140,.09); }
+    * { box-sizing:border-box; }
+    body { margin:0; padding:0 0 3px; font-family:system-ui,-apple-system,"Segoe UI",sans-serif; color:var(--text); background:transparent; }
+    .form-label { display:block;margin:0 0 7px;font-size:14px;font-weight:550;color:var(--text); }
+    .search { position:relative; }
+    .field { display:flex; align-items:center; gap:8px; min-height:48px; padding:0 12px; border:1px solid var(--border); border-radius:13px; background:var(--surface); box-shadow:0 3px 0 rgba(70,100,130,.12),0 7px 16px rgba(25,50,80,.08); transition:border-color .16s,box-shadow .16s; }
+    .field:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 20%,transparent),0 7px 16px rgba(25,50,80,.1); }
+    .glass { color:var(--muted); font-size:17px; line-height:1; }
+    input { width:100%; min-width:0; border:0; outline:0; color:var(--text); background:transparent; font:500 15px system-ui,-apple-system,"Segoe UI",sans-serif; }
+    input::placeholder { color:var(--muted); opacity:.9; }
+    .clear { border:0; padding:4px; color:var(--muted); background:transparent; font-size:18px; cursor:pointer; }
+    .suggestions { display:none; position:relative; z-index:4; margin-top:7px; padding:5px; max-height:270px; overflow:auto; border:1px solid var(--border); border-radius:13px; background:var(--surface); box-shadow:0 12px 26px rgba(20,40,60,.19); }
+    .suggestions.open { display:block; }
+    .hint { padding:7px 9px 5px; color:var(--muted); font-size:11px; font-weight:750; letter-spacing:.07em; text-transform:uppercase; }
+    .option { display:flex; width:100%; align-items:center; gap:10px; border:0; border-radius:9px; padding:10px 9px; text-align:left; color:var(--text); background:transparent; cursor:pointer; }
+    .option:hover,.option.active { background:var(--hover); }
+    .pin { flex:0 0 auto; color:var(--accent); font-size:17px; }
+    .place { min-width:0; flex:1; }
+    .name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:14px; font-weight:650; }
+    .region { margin-top:2px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; }
+    .status { display:none; padding:10px; color:var(--muted); font-size:13px; }
+    .status.show { display:block; }
+    @media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+  </style>
+</head>
+<body>
+  <div class="search">
+    <label class="form-label" id="label" for="city">Search a city worldwide</label>
+    <div class="field">
+      <span class="glass" aria-hidden="true">⌕</span>
+      <input id="city" type="text" autocomplete="off" aria-label="Search a city worldwide" placeholder="Search any city">
+      <button class="clear" id="clear" type="button" aria-label="Clear search" title="Clear">×</button>
+    </div>
+    <div id="suggestions" class="suggestions" role="listbox" aria-label="Matching places worldwide"></div>
+    <div id="status" class="status"></div>
+  </div>
+  <script>
+    const input = document.getElementById("city");
+    const list = document.getElementById("suggestions");
+    const statusBox = document.getElementById("status");
+    const clearButton = document.getElementById("clear");
+    let currentResults = [];
+    let activeIndex = -1;
+    let requestNumber = 0;
+    let debounceTimer = null;
+    let lastPythonValue = null;
+    let componentTheme = {};
+
+    function sendValue(value) {
+      window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:setComponentValue",value,dataType:"json"},"*");
+    }
+    function resizeFrame() {
+      const height = Math.max(59, Math.min(345, document.body.scrollHeight + 2));
+      window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:setFrameHeight",height},"*");
+    }
+    function applyTheme(theme) {
+      componentTheme = theme || {};
+      const root = document.documentElement;
+      root.style.setProperty("--bg", componentTheme.backgroundColor || "#ffffff");
+      root.style.setProperty("--surface", componentTheme.secondaryBackgroundColor || componentTheme.backgroundColor || "#ffffff");
+      root.style.setProperty("--text", componentTheme.textColor || "#25364a");
+      root.style.setProperty("--muted", componentTheme.textColor ? `color-mix(in srgb, ${componentTheme.textColor} 65%, transparent)` : "#718096");
+      root.style.setProperty("--border", componentTheme.borderColor || "#d6e0e8");
+      root.style.setProperty("--accent", componentTheme.primaryColor || "#087f8c");
+      root.style.setProperty("--hover", componentTheme.primaryColor ? `color-mix(in srgb, ${componentTheme.primaryColor} 13%, transparent)` : "rgba(8,127,140,.09)");
+    }
+    function closeList() {
+      list.classList.remove("open");
+      list.replaceChildren();
+      activeIndex = -1;
+      resizeFrame();
+    }
+    function showStatus(message) {
+      closeList();
+      statusBox.textContent = message;
+      statusBox.classList.add("show");
+      resizeFrame();
+    }
+    function choose(index) {
+      const place = currentResults[index];
+      if (!place) return;
+      const label = `${place.name}, ${[place.admin1, place.country].filter(Boolean).join(", ") || "Location"}`;
+      input.value = label;
+      statusBox.classList.remove("show");
+      closeList();
+      sendValue({type:"select", place, label, nonce:Date.now()});
+    }
+    function renderResults(results) {
+      currentResults = results;
+      activeIndex = -1;
+      statusBox.classList.remove("show");
+      list.replaceChildren();
+      if (!results.length) {
+        showStatus("No matching place found. Try another spelling or add the country name.");
+        return;
+      }
+      const heading = document.createElement("div");
+      heading.className = "hint";
+      heading.textContent = "Places worldwide";
+      list.appendChild(heading);
+      results.forEach((place, index) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "option";
+        button.setAttribute("role", "option");
+        button.innerHTML = '<span class="pin" aria-hidden="true">⌖</span><span class="place"><span class="name"></span><span class="region"></span></span>';
+        button.querySelector(".name").textContent = place.name || "Unnamed place";
+        button.querySelector(".region").textContent = [place.admin1, place.country].filter(Boolean).join(" · ");
+        button.addEventListener("pointerdown", event => event.preventDefault());
+        button.addEventListener("click", () => choose(index));
+        list.appendChild(button);
+      });
+      list.classList.add("open");
+      resizeFrame();
+    }
+    async function lookup(query) {
+      const requestId = ++requestNumber;
+      try {
+        const url = new URL("https://geocoding-api.open-meteo.com/v1/search");
+        url.search = new URLSearchParams({name:query,count:"8",language:"en"});
+        const response = await fetch(url.toString());
+        if (!response.ok) throw new Error("search unavailable");
+        const data = await response.json();
+        if (requestId !== requestNumber || input.value.trim().toLowerCase() !== query.toLowerCase()) return;
+        const seen = new Set();
+        const results = (data.results || []).filter(place => {
+          const key = `${place.name}|${place.admin1 || ""}|${place.country_code || ""}`.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+        renderResults(results);
+      } catch (error) {
+        if (requestId === requestNumber) showStatus("Place search is unavailable right now. Check your connection.");
+      }
+    }
+    input.addEventListener("input", () => {
+      const query = input.value.trim();
+      clearTimeout(debounceTimer);
+      if (query.length < 2) {
+        requestNumber++;
+        closeList();
+        statusBox.classList.remove("show");
+        resizeFrame();
+        return;
+      }
+      statusBox.classList.remove("show");
+      debounceTimer = setTimeout(() => lookup(query), 240);
+    });
+    input.addEventListener("keydown", event => {
+      const options = [...list.querySelectorAll(".option")];
+      if (event.key === "ArrowDown" && options.length) {
+        event.preventDefault(); activeIndex = (activeIndex + 1) % options.length;
+      } else if (event.key === "ArrowUp" && options.length) {
+        event.preventDefault(); activeIndex = (activeIndex - 1 + options.length) % options.length;
+      } else if (event.key === "Enter" && options.length) {
+        event.preventDefault(); choose(activeIndex < 0 ? 0 : activeIndex);
+      } else if (event.key === "Escape") closeList();
+      options.forEach((option, index) => option.classList.toggle("active", index === activeIndex));
+      if (options[activeIndex]) options[activeIndex].scrollIntoView({block:"nearest"});
+    });
+    clearButton.addEventListener("click", () => {
+      input.value = ""; input.focus(); closeList(); statusBox.classList.remove("show");
+      sendValue({type:"clear", nonce:Date.now()});
+    });
+    window.addEventListener("message", event => {
+      const message = event.data;
+      if (!message || message.type !== "streamlit:render") return;
+      const args = message.args || {};
+      applyTheme(message.theme || args.theme || {});
+      document.getElementById("label").textContent = args.label || "Search a city worldwide";
+      if (lastPythonValue === null || args.value !== lastPythonValue) {
+        input.value = args.value || "";
+        lastPythonValue = args.value || "";
+      }
+      if (document.activeElement !== input) closeList();
+      resizeFrame();
+    });
+    window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:componentReady",apiVersion:1},"*");
+    window.parent.postMessage({isStreamlitMessage:true,type:"streamlit:setFrameHeight",height:59},"*");
+  </script>
+</body>
+</html>
